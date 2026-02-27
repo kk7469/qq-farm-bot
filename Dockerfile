@@ -41,7 +41,7 @@ ENV NODE_ENV=production \
     TZ=Asia/Shanghai
 
 # 暴露的端口（如果 Bot 需要 WebHook/HTTP 服务）
-EXPOSE 8080
+EXPOSE 3000
 
 # ==============================
 # 6️⃣ 启动入口
