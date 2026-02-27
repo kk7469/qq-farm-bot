@@ -2,21 +2,19 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths-ignore:
       - "**.md"
       - ".gitignore"
       - "docs/**"
     tags:
-      - "v*"  # 触发版本构建
+      - "v*"
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 env:
   DOCKER_IMAGE: leywu/qq-farm-bot
-  DOCKERFILE_PATH: ./Dockerfile
+  DOCKERFILE_PATH: Dockerfile   # <-- 根目录
 
 jobs:
   build-and-push:
@@ -26,6 +24,28 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 防止浅克隆导致文件缺失
+
+      # ---------- 调试块（第一次运行后可以删掉） ----------
+      - name: Debug repo layout
+        run: |
+          echo "🔎 当前目录"
+          pwd
+          echo "📂 文件列表"
+          ls -aR
+          echo "📝 .dockerignore"
+          cat .dockerignore || echo "none"
+      - name: Verify Dockerfile path
+        run: |
+          echo "🚦 检查路径：${{ env.DOCKERFILE_PATH }}"
+          if [ -f "${{ env.DOCKERFILE_PATH }}" ]; then
+            echo "✅ Dockerfile 存在"
+          else
+            echo "❌ Dockerfile 未找到！请确认路径、大小写或 .dockerignore"
+            exit 1
+          fi
+      # -----------------------------------------------------
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -39,13 +59,13 @@ jobs:
       - name: Get version from tag
         id: version
         run: |
-          if [[ $GITHUB_REF == refs/tags/* ]]; then
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
             echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "✅ 使用标签版本: $VERSION"
+            echo "✅ Tag version: $VERSION"
           else
             echo "version=latest" >> $GITHUB_OUTPUT
-            echo "✅ 使用 latest 版本（main 分支推送）"
+            echo "✅ No tag → use latest"
           fi
 
       - name: Build and push Docker image
