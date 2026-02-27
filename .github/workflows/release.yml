@@ -1,13 +1,10 @@
 name: release
 
-# -------------------------------------------------
-# 1️⃣ 触发方式（手动）
-# -------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g. v1.2.3)'
+        description: 'Version tag (e.g. v1.0.0)'
         required: true
         default: 'v0.0.0'
       latest:
@@ -20,15 +17,12 @@ on:
         default: 'false'
 
 # -------------------------------------------------
-# 2️⃣ 需要的权限（私有仓库请打开）
+# 让工作流拥有写 Release 的权限（私库必需）
 # -------------------------------------------------
 permissions:
-  contents: write      # Release 创建/更新
-  packages: read       # （如果以后要 push Docker，可改成 write）
+  contents: write   # 创建/更新 Release
+  packages: read    # （如果后面要 push Docker）
 
-# -------------------------------------------------
-# 3️⃣ 第一个 Job：构建并上传 artifact
-# -------------------------------------------------
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,10 +30,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 🎯 关键：pnpm 版本要和 package.json 中的 packageManager 完全一致
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 10.30.2   # ← 同步到 package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -47,21 +42,18 @@ jobs:
           node-version: '20'
           cache: pnpm
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm package:release
 
-      # DEBUG：列出产物目录（如果路径不对这里会报错）
-      - name: List Built Artifacts (debug)
+      - name: List built artefacts (debug)
         run: |
-          echo "🔎 列出 core/dist 目录"
-          ls -R core/dist || echo "⚠️ core/dist 不存在，可能构建脚本输出路径不对"
+          echo "🔎 查看 core/dist 目录"
+          ls -R core/dist || echo "⚠️ core/dist 不存在，請檢查 pnpm package:release 輸出路徑"
 
-      # -------------------------------------------------
-      # 上传四个平台的可执行文件
-      # -------------------------------------------------
+      # --------------------- 上传四个平台的产物 ---------------------
       - name: Upload Windows
         uses: actions/upload-artifact@v4
         with:
@@ -86,29 +78,26 @@ jobs:
           name: farm-mac-arm64
           path: ./core/dist/qq-farm-bot-macos-arm64
 
-# -------------------------------------------------
-# 4️⃣ 第二个 Job：下载 artifact 并发布 Release
-# -------------------------------------------------
+  # -------------------------------------------------
+  # 发布 Release
+  # -------------------------------------------------
   publish-release:
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Checkout (needed for release action to have repo context)
+      - name: Checkout (needed for release-action)
         uses: actions/checkout@v4
 
-      # 下载所有之前上传的 artifact，放到 ./artifacts 目录
-      - name: Download Artifacts
+      - name: Download all artefacts
         uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
+          path: ./artifacts   # 所有 artefact 会放在 artifacts/<name>/ 下面
 
-      # DEBUG：确认文件结构
-      - name: Show downloaded artifact tree
+      - name: Show downloaded artefacts (debug)
         run: |
-          echo "📂 下载的文件结构"
+          echo "📂 artefacts 目錄結構"
           ls -R artifacts
 
-      # 正式发布 Release
       - name: Create / Update Release
         uses: ncipollo/release-action@v1
         with:
@@ -119,7 +108,6 @@ jobs:
           makeLatest: ${{ fromJSON(github.event.inputs.latest) }}
           prerelease: ${{ fromJSON(github.event.inputs.prerelease) }}
           allowUpdates: true
-          # 这里的路径相对于工作区根目录（即 `artifacts/`）
           artifacts: |
             artifacts/farm-win-x64/qq-farm-bot-win-x64.exe,
             artifacts/farm-linux-x64/qq-farm-bot-linux-x64,
