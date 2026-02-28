@@ -1,28 +1,73 @@
-Release:
-  runs-on: ubuntu-latest
-  needs: build
-  steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+name: release
 
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4   # 默认下载到工作目录根
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version'
+        required: false
+        default: 'v0.0.0'
+      latest:
+        description: 'Latest'
+        required: false
+        default: 'true'
+      prerelease:
+        description: 'Prerelease'
+        required: false
+        default: 'false'
 
-    - name: Display structure of downloaded files
-      run: ls -R .   # 查看根目录下的子目录
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Release
-      uses: ncipollo/release-action@v1
-      with:
-        name: ${{ github.event.inputs.version }}
-        tag: ${{ github.event.inputs.version }}
-        body: ${{ github.event.inputs.version }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        makeLatest: ${{ github.event.inputs.latest }}
-        prerelease: ${{ github.event.inputs.prerelease }}
-        allowUpdates: true
-        artifacts: |
-          farm-win-x64/qq-farm-bot-win-x64.exe,
-          farm-linux-x64/qq-farm-bot-linux-x64,
-          farm-mac-x64/qq-farm-bot-macos-x64,
-          farm-mac-arm64/qq-farm-bot-macos-arm64
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint Web
+        run: pnpm -C web lint
+
+      - name: Lint Core
+        run: pnpm -C core exec eslint "src/**/*.js" "client.js"
+
+      - name: Build Web
+        run: pnpm build:web
+
+  Release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          name: ${{ github.event.inputs.version }}
+          tag: ${{ github.event.inputs.version }}
+          body: ${{ github.event.inputs.version }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          makeLatest: ${{ github.event.inputs.latest }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          allowUpdates: true
+          artifacts: >
+            farm-win-x64/qq-farm-bot-win-x64.exe,
+            farm-linux-x64/qq-farm-bot-linux-x64,
+            farm-mac-x64/qq-farm-bot-macos-x64,
+            farm-mac-arm64/qq-farm-bot-macos-arm64
