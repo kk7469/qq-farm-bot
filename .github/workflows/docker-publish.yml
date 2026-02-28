@@ -1,0 +1,91 @@
+name: Build & Publish Docker Image
+
+# -------------------------------------------------
+# 触发条件
+# -------------------------------------------------
+on:
+  push:
+    branches:
+      - main                     # 推送到 main 分支时构建
+    tags:
+      - 'v*'                     # 任意以 v 开头的 tag（如 v1.0.0）时构建
+  workflow_dispatch:            # 手动触发
+
+# -------------------------------------------------
+# 全局变量（只需在这里改一次即可）
+# -------------------------------------------------
+env:
+  # Docker Hub 上的目标仓库，格式为 "用户名/仓库名"
+  # ← 这里把用户名改为 leywu
+  IMAGE_NAME: leywu/qq-farm-bot
+
+# -------------------------------------------------
+# 作业
+# -------------------------------------------------
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read          # 读取代码
+      packages: write         # （可选）推到 GitHub Packages 时需要
+      id-token: write         # （可选）OIDC 用途
+
+    steps:
+      # 1️⃣ 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # 拉取完整历史，便于获取 tag、SHA 等信息
+
+      # 2️⃣ 设置 QEMU（支持多平台交叉编译）
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      # 3️⃣ 设置 Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          version: latest
+
+      # 4️⃣ 登录 Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}   # ← 这里的 secret 需要是 "leywu"
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 5️⃣ 计算镜像标签（latest、sha、git tag）
+      - name: Set image tags
+        id: meta
+        run: |
+          # 默认标签：latest + 短 SHA
+          TAGS="${{ env.IMAGE_NAME }}:latest,${{ env.IMAGE_NAME }}:${GITHUB_SHA::7}"
+          
+          # 若是 tag 触发，则使用 tag 名称（默认去掉前导的 v）
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            TAG_NAME=$(echo "$TAG_NAME" | sed -e 's/^v//')
+            TAGS="${{ env.IMAGE_NAME }}:${TAG_NAME},${{ env.IMAGE_NAME }}:latest"
+          fi
+          
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+
+      # 6️⃣ 构建并推送镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # 如需构建多平台，请保留此行；如仅需 amd64 可改成 linux/amd64
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          # 使用 Docker Hub 作为缓存，加速后续构建
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
+
+      # 7️⃣（可选）打印镜像摘要
+      - name: Image digest
+        run: echo "Image digest: ${{ steps.build-and-push.outputs.digest }}"
