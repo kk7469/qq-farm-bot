@@ -87,5 +87,5 @@ jobs:
           cache-to: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache,mode=max
 
       # 7️⃣（可选）打印镜像摘要
-      - name: Image digest
-        run: echo "Image digest: ${{ steps.build-and-push.outputs.digest }}"
+      #- name: Image digest
+        #run: echo "Image digest: ${{ steps.build-and-push.outputs.digest }}"
