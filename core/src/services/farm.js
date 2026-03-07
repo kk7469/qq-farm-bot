@@ -12,6 +12,7 @@ const { toLong, toNum, getServerTimeSec, toTimeSec, log, logWarn, sleep } = requ
 const { getPlantRankings } = require('./analytics');
 const { createScheduler } = require('./scheduler');
 const { recordOperation } = require('./stats');
+const { getFarmOptimizer } = require('./rate-limiter');
 
 // ============ 内部状态 ============
 let isCheckingFarm = false;
@@ -131,7 +132,7 @@ async function fertilizeOrganicLoop(landIds) {
         }
 
         idx = (idx + 1) % ids.length;
-        await sleep(100);
+        await sleep(1000);
     }
 
     return successCount;
@@ -788,6 +789,100 @@ function analyzeLands(lands) {
     return result;
 }
 
+function buildLandMap(lands) {
+    const map = new Map();
+    const list = Array.isArray(lands) ? lands : [];
+    for (const land of list) {
+        const id = toNum(land && land.id);
+        if (id > 0) map.set(id, land);
+    }
+    return map;
+}
+
+function getLandLifecycleState(land) {
+    if (!land) return 'unknown';
+    const plant = land.plant;
+    if (!plant || !Array.isArray(plant.phases) || plant.phases.length === 0) {
+        return 'empty';
+    }
+
+    const currentPhase = getCurrentPhase(plant.phases, false, '');
+    if (!currentPhase) return 'empty';
+
+    const phaseVal = toNum(currentPhase.phase);
+    if (phaseVal === PlantPhase.DEAD) return 'dead';
+    if (phaseVal === PlantPhase.UNKNOWN) return 'empty';
+    if (phaseVal >= PlantPhase.SEED && phaseVal <= PlantPhase.MATURE) return 'growing';
+    return 'unknown';
+}
+
+function classifyHarvestedLandsByMap(landIds, landsMap) {
+    const removable = [];
+    const growing = [];
+    const unknown = [];
+    for (const id of landIds) {
+        const land = landsMap.get(id);
+        if (!land) {
+            unknown.push(id);
+            continue;
+        }
+        const state = getLandLifecycleState(land);
+        if (state === 'dead' || state === 'empty') {
+            removable.push(id);
+            continue;
+        }
+        if (state === 'growing') {
+            growing.push(id);
+            continue;
+        }
+        unknown.push(id);
+    }
+    return { removable, growing, unknown };
+}
+
+async function resolveRemovableHarvestedLands(harvestedLandIds, harvestReply) {
+    const ids = Array.isArray(harvestedLandIds) ? harvestedLandIds.filter(Boolean) : [];
+    if (ids.length === 0) {
+        return { removable: [], growing: [], fallbackRemoved: 0 };
+    }
+
+    const replyMap = buildLandMap(harvestReply && harvestReply.land);
+    const firstPass = classifyHarvestedLandsByMap(ids, replyMap);
+    const removable = [...firstPass.removable];
+    const growing = [...firstPass.growing];
+    let unknown = [...firstPass.unknown];
+    let fallbackRemoved = 0;
+
+    if (unknown.length > 0) {
+        try {
+            const latestLandsReply = await getAllLands();
+            const latestMap = buildLandMap(latestLandsReply && latestLandsReply.lands);
+            const secondPass = classifyHarvestedLandsByMap(unknown, latestMap);
+            removable.push(...secondPass.removable);
+            growing.push(...secondPass.growing);
+            unknown = secondPass.unknown;
+        } catch (e) {
+            logWarn('农场', `收后状态补拉失败: ${e.message}`, {
+                module: 'farm',
+                event: 'post_harvest_state_fallback',
+                result: 'error',
+            });
+        }
+    }
+
+    if (unknown.length > 0) {
+        // 按兼容策略：不可判定时保持旧行为，继续铲除
+        removable.push(...unknown);
+        fallbackRemoved = unknown.length;
+    }
+
+    return {
+        removable: [...new Set(removable)],
+        growing: [...new Set(growing)],
+        fallbackRemoved,
+    };
+}
+
 async function checkFarm() {
     const state = getUserState();
     if (isCheckingFarm || !state.gid || !isAutomationOn('farm')) return false;
@@ -795,7 +890,7 @@ async function checkFarm() {
 
     try {
         // 复用手动操作逻辑
-        const result = await runFarmOperation('all');
+        const result = await runFarmOperation('all', { automated: true });
         isFirstFarmCheck = false;
         return !!(result && result.hadWork);
     } catch (err) {
@@ -810,7 +905,8 @@ async function checkFarm() {
  * 手动/自动执行农场操作
  * @param {string} opType - 'all', 'harvest', 'clear', 'plant', 'upgrade'
  */
-async function runFarmOperation(opType) {
+async function runFarmOperation(opType, options = {}) {
+    const isAutomated = !!options.automated;
     const landsReply = await getAllLands();
     if (!landsReply.lands || landsReply.lands.length === 0) {
         if (opType !== 'all') {
@@ -835,28 +931,67 @@ async function runFarmOperation(opType) {
     statusParts.push(`长:${status.growing.length}`);
 
     const actions = [];
-    const batchOps = [];
+    const optimizer = getFarmOptimizer();
 
-    // 执行除草/虫/水
+    // 执行除草/虫/水 (使用并发控制)
     if (opType === 'all' || opType === 'clear') {
-        if (status.needWeed.length > 0) {
-            batchOps.push(weedOut(status.needWeed).then(() => { actions.push(`除草${status.needWeed.length}`); recordOperation('weed', status.needWeed.length); }).catch(e => logWarn('除草', e.message)));
+        const canAutoManageFarm = !isAutomated || !!isAutomationOn('farm_manage');
+        const enableAutoWater = !isAutomated || !!isAutomationOn('farm_water');
+        const enableAutoWeed = !isAutomated || !!isAutomationOn('farm_weed');
+        const enableAutoBug = !isAutomated || !!isAutomationOn('farm_bug');
+        const farmOperations = [];
+        
+        if (canAutoManageFarm && enableAutoWeed && status.needWeed.length > 0) {
+            farmOperations.push({
+                type: 'weed',
+                landIds: status.needWeed,
+                fn: async () => {
+                    await weedOut(status.needWeed);
+                    actions.push(`除草${status.needWeed.length}`);
+                    recordOperation('weed', status.needWeed.length);
+                }
+            });
         }
-        if (status.needBug.length > 0) {
-            batchOps.push(insecticide(status.needBug).then(() => { actions.push(`除虫${status.needBug.length}`); recordOperation('bug', status.needBug.length); }).catch(e => logWarn('除虫', e.message)));
+        if (canAutoManageFarm && enableAutoBug && status.needBug.length > 0) {
+            farmOperations.push({
+                type: 'bug',
+                landIds: status.needBug,
+                fn: async () => {
+                    await insecticide(status.needBug);
+                    actions.push(`除虫${status.needBug.length}`);
+                    recordOperation('bug', status.needBug.length);
+                }
+            });
         }
-        if (status.needWater.length > 0) {
-            batchOps.push(waterLand(status.needWater).then(() => { actions.push(`浇水${status.needWater.length}`); recordOperation('water', status.needWater.length); }).catch(e => logWarn('浇水', e.message)));
+        if (canAutoManageFarm && enableAutoWater && status.needWater.length > 0) {
+            farmOperations.push({
+                type: 'water',
+                landIds: status.needWater,
+                fn: async () => {
+                    await waterLand(status.needWater);
+                    actions.push(`浇水${status.needWater.length}`);
+                    recordOperation('water', status.needWater.length);
+                }
+            });
         }
-        if (batchOps.length > 0) await Promise.all(batchOps);
+        
+        // 使用批量操作优化器执行
+        if (farmOperations.length > 0) {
+            try {
+                await optimizer.batchFarmOperations(farmOperations);
+            } catch (e) {
+                logWarn('农场', `批量操作失败: ${e.message}`);
+            }
+        }
     }
 
     // 执行收获
     let harvestedLandIds = [];
+    let harvestReply = null;
     if (opType === 'all' || opType === 'harvest') {
         if (status.harvestable.length > 0) {
             try {
-                await harvest(status.harvestable);
+                harvestReply = await harvest(status.harvestable);
                 log('收获', `收获完成 ${status.harvestable.length} 块土地`, {
                     module: 'farm',
                     event: 'harvest_crop',
@@ -884,8 +1019,13 @@ async function runFarmOperation(opType) {
 
     // 执行种植
     if (opType === 'all' || opType === 'plant') {
-        const allDeadLands = [...status.dead, ...harvestedLandIds]; // 收获后可能有地
-        const allEmptyLands = [...status.empty];
+        const allEmptyLands = [...new Set(status.empty)];
+        let allDeadLands = [...new Set(status.dead)];
+
+        if (opType === 'all' && harvestedLandIds.length > 0) {
+            const postHarvest = await resolveRemovableHarvestedLands(harvestedLandIds, harvestReply);
+            allDeadLands = [...new Set([...allDeadLands, ...postHarvest.removable])];
+        }
         // 注意：如果是单纯点"一键种植"，harvestedLandIds 为空，只种当前的空地/死地
         if (allDeadLands.length > 0 || allEmptyLands.length > 0) {
             try {

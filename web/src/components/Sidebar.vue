@@ -134,12 +134,21 @@ const displayName = computed(() => {
   // 1. 优先显示实时状态中的昵称 (如果有且不是未登录)
   const liveName = status.value?.status?.name
   if (liveName && liveName !== '未登录') {
+    // 如果有备注，显示为“昵称（备注）”
+    if (acc.name) {
+      return `${liveName} (${acc.name})`
+    }
     return liveName
   }
 
   // 2. 其次显示账号存储的备注名称 (name)
-  if (acc.name)
+  if (acc.name) {
+    // 如果有同步的昵称，显示为“昵称（备注）”
+    if (acc.nick) {
+      return `${acc.nick} (${acc.name})`
+    }
     return acc.name
+  }
 
   // 3. 显示同步的昵称 (nick)
   if (acc.nick)
@@ -293,7 +302,7 @@ watch(
                 </div>
                 <div class="min-w-0 flex flex-1 flex-col items-start">
                   <span class="w-full truncate text-left text-sm font-medium">
-                    {{ acc.name || acc.nick || acc.uin }}
+                    {{ acc.nick && acc.name ? `${acc.nick} (${acc.name})` : acc.name || acc.nick || acc.uin }}
                   </span>
                   <div class="flex items-center gap-1.5">
                     <span

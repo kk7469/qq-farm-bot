@@ -22,6 +22,8 @@ const { seeds } = storeToRefs(farmStore)
 const saving = ref(false)
 const passwordSaving = ref(false)
 const offlineSaving = ref(false)
+const offlineTesting = ref(false)
+const qrSaving = ref(false)
 
 const modalVisible = ref(false)
 const modalConfig = ref({
@@ -53,6 +55,10 @@ const localSettings = ref({
   friendQuietHours: { enabled: false, start: '23:00', end: '07:00' },
   automation: {
     farm: false,
+    farm_manage: false,
+    farm_water: false,
+    farm_weed: false,
+    farm_bug: false,
     task: false,
     sell: false,
     friend: false,
@@ -74,6 +80,9 @@ const localSettings = ref({
   },
 })
 
+const friendDisabled = computed(() => !localSettings.value.automation.friend)
+const farmDisabled = computed(() => !localSettings.value.automation.farm_manage)
+
 const localOffline = ref({
   channel: 'webhook',
   reloginUrlMode: 'none',
@@ -82,6 +91,10 @@ const localOffline = ref({
   title: '',
   msg: '',
   offlineDeleteSec: 120,
+})
+
+const localQrLogin = ref({
+  apiDomain: 'q.qq.com',
 })
 
 const passwordForm = ref({
@@ -104,6 +117,10 @@ function syncLocalSettings() {
     if (!localSettings.value.automation) {
       localSettings.value.automation = {
         farm: false,
+        farm_manage: false,
+        farm_water: false,
+        farm_weed: false,
+        farm_bug: false,
         task: false,
         sell: false,
         friend: false,
@@ -128,6 +145,10 @@ function syncLocalSettings() {
       // Merge with defaults to ensure all keys exist
       const defaults = {
         farm: false,
+        farm_manage: false,
+        farm_water: false,
+        farm_weed: false,
+        farm_bug: false,
         task: false,
         sell: false,
         friend: false,
@@ -156,6 +177,9 @@ function syncLocalSettings() {
     // Sync offline settings (global)
     if (settings.value.offlineReminder) {
       localOffline.value = JSON.parse(JSON.stringify(settings.value.offlineReminder))
+    }
+    if (settings.value.qrLogin) {
+      localQrLogin.value = JSON.parse(JSON.stringify(settings.value.qrLogin))
     }
   }
 }
@@ -239,8 +263,9 @@ const CHANNEL_DOCS: Record<string, string> = {
 
 const reloginUrlModeOptions = [
   { label: '不需要', value: 'none' },
-  { label: 'QQ直链', value: 'qq_link' },
-  { label: '二维码链接', value: 'qr_link' },
+  { label: '链接', value: 'qq_link' },
+  { label: '二维码', value: 'qr_code' },
+  { label: '二维码 + 链接', value: 'all' },
 ]
 
 const currentChannelDocUrl = computed(() => {
@@ -366,6 +391,21 @@ async function handleChangePassword() {
   }
 }
 
+async function handleSaveQrLogin() {
+  qrSaving.value = true
+  try {
+    const res = await settingStore.saveQrLoginConfig(localQrLogin.value)
+    if (res.ok) {
+      showAlert('二维码接口设置已保存')
+    }
+    else {
+      showAlert(`保存失败: ${res.error || '未知错误'}`, 'danger')
+    }
+  }
+  finally {
+    qrSaving.value = false
+  }
+}
 async function handleSaveOffline() {
   offlineSaving.value = true
   try {
@@ -380,6 +420,26 @@ async function handleSaveOffline() {
   }
   finally {
     offlineSaving.value = false
+  }
+}
+
+async function handleTestOffline() {
+  offlineTesting.value = true
+  try {
+    const { data } = await api.post('/api/settings/offline-reminder/test', localOffline.value)
+    if (data?.ok) {
+      showAlert('测试消息发送成功')
+    }
+    else {
+      showAlert(`测试失败: ${data?.error || '未知错误'}`, 'danger')
+    }
+  }
+  catch (e: any) {
+    const msg = e?.response?.data?.error || e?.message || '请求失败'
+    showAlert(`测试失败: ${msg}`, 'danger')
+  }
+  finally {
+    offlineTesting.value = false
   }
 }
 </script>
@@ -419,10 +479,14 @@ async function handleSaveOffline() {
               label="优先种植种子"
               :options="preferredSeedOptions"
             />
-            <div v-else class="flex flex-col gap-1">
-              <span class="text-xs text-gray-500 dark:text-gray-400">策略选种预览</span>
-              <div class="h-9 flex items-center border border-gray-200 rounded-md bg-gray-50 px-3 text-sm text-gray-600 dark:border-gray-600 dark:bg-gray-700/50 dark:text-gray-300">
-                {{ strategyPreviewLabel ?? '加载中...' }}
+            <!-- 预览区域：与 BaseSelect 同结构同样式，避免切换策略时布局跳动 -->
+            <div v-else class="flex flex-col gap-1.5">
+              <label class="text-sm text-gray-700 font-medium dark:text-gray-300">策略选种预览</label>
+              <div
+                class="w-full flex items-center justify-between border border-gray-200 rounded-lg bg-gray-50 px-3 py-2 text-gray-500 dark:border-gray-600 dark:bg-gray-800/50 dark:text-gray-400"
+              >
+                <span class="truncate">{{ strategyPreviewLabel ?? '加载中...' }}</span>
+                <div class="i-carbon-chevron-down shrink-0 text-lg text-gray-400" />
               </div>
             </div>
           </div>
@@ -433,24 +497,28 @@ async function handleSaveOffline() {
               label="农场巡查最小 (秒)"
               type="number"
               min="1"
+              max="86400"
             />
             <BaseInput
               v-model.number="localSettings.intervals.farmMax"
               label="农场巡查最大 (秒)"
               type="number"
               min="1"
+              max="86400"
             />
             <BaseInput
               v-model.number="localSettings.intervals.friendMin"
               label="好友巡查最小 (秒)"
               type="number"
               min="1"
+              max="86400"
             />
             <BaseInput
               v-model.number="localSettings.intervals.friendMax"
               label="好友巡查最大 (秒)"
               type="number"
               min="1"
+              max="86400"
             />
           </div>
 
@@ -490,6 +558,7 @@ async function handleSaveOffline() {
           <!-- Switches Grid -->
           <div class="grid grid-cols-2 gap-3 md:grid-cols-3">
             <BaseSwitch v-model="localSettings.automation.farm" label="自动种植收获" />
+            <BaseSwitch v-model="localSettings.automation.farm_manage" label="自动打理农场" />
             <BaseSwitch v-model="localSettings.automation.task" label="自动做任务" />
             <BaseSwitch v-model="localSettings.automation.sell" label="自动卖果实" />
             <BaseSwitch v-model="localSettings.automation.friend" label="自动好友互动" />
@@ -506,11 +575,17 @@ async function handleSaveOffline() {
           </div>
 
           <!-- Sub-controls -->
-          <div v-if="localSettings.automation.friend" class="flex flex-wrap gap-4 rounded bg-blue-50 p-2 text-sm dark:bg-blue-900/20">
-            <BaseSwitch v-model="localSettings.automation.friend_steal" label="自动偷菜" />
-            <BaseSwitch v-model="localSettings.automation.friend_help" label="自动帮忙" />
-            <BaseSwitch v-model="localSettings.automation.friend_bad" label="自动捣乱" />
-            <BaseSwitch v-model="localSettings.automation.friend_help_exp_limit" label="经验上限停止帮忙" />
+          <div class="flex flex-wrap gap-4 rounded bg-emerald-50 p-2 text-sm dark:bg-emerald-900/20" :class="{ 'opacity-50 pointer-events-none': farmDisabled }">
+            <BaseSwitch v-model="localSettings.automation.farm_water" label="自动浇水" :disabled="farmDisabled" />
+            <BaseSwitch v-model="localSettings.automation.farm_bug" label="自动除虫" :disabled="farmDisabled" />
+            <BaseSwitch v-model="localSettings.automation.farm_weed" label="自动除草" :disabled="farmDisabled" />
+          </div>
+
+          <div class="flex flex-wrap gap-4 rounded bg-blue-50 p-2 text-sm dark:bg-blue-900/20" :class="{ 'opacity-50 pointer-events-none': friendDisabled }">
+            <BaseSwitch v-model="localSettings.automation.friend_steal" label="自动偷菜" :disabled="friendDisabled" />
+            <BaseSwitch v-model="localSettings.automation.friend_help" label="自动帮忙" :disabled="friendDisabled" />
+            <BaseSwitch v-model="localSettings.automation.friend_bad" label="自动捣乱" :disabled="friendDisabled" />
+            <BaseSwitch v-model="localSettings.automation.friend_help_exp_limit" label="经验上限停止帮忙" :disabled="friendDisabled" />
           </div>
 
           <!-- Fertilizer -->
@@ -599,6 +674,36 @@ async function handleSaveOffline() {
           </div>
         </div>
 
+        <!-- QR Login Header -->
+        <div class="border-b border-t bg-gray-50/50 px-4 py-3 dark:border-gray-700 dark:bg-gray-800/50">
+          <h3 class="flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
+            <div class="i-carbon-qr-code" />
+            二维码登录接口
+          </h3>
+        </div>
+
+        <!-- QR Login Content -->
+        <div class="p-4 space-y-3">
+          <BaseInput
+            v-model="localQrLogin.apiDomain"
+            label="二维码接口域名"
+            type="text"
+            placeholder="q.qq.com"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            仅影响后端调用二维码相关接口的域名，前端仍使用 /api/qr/create 与 /api/qr/check。
+          </p>
+          <div class="flex justify-end">
+            <BaseButton
+              variant="primary"
+              size="sm"
+              :loading="qrSaving"
+              @click="handleSaveQrLogin"
+            >
+              保存二维码接口设置
+            </BaseButton>
+          </div>
+        </div>
         <!-- Offline Header -->
         <div class="border-b border-t bg-gray-50/50 px-4 py-3 dark:border-gray-700 dark:bg-gray-800/50">
           <h3 class="flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
@@ -673,11 +778,21 @@ async function handleSaveOffline() {
         </div>
 
         <!-- Save Offline Button -->
-        <div class="mt-auto flex justify-end border-t bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/50">
+        <div class="mt-auto flex justify-end gap-2 border-t bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/50">
+          <BaseButton
+            variant="secondary"
+            size="sm"
+            :loading="offlineTesting"
+            :disabled="offlineSaving"
+            @click="handleTestOffline"
+          >
+            测试通知
+          </BaseButton>
           <BaseButton
             variant="primary"
             size="sm"
             :loading="offlineSaving"
+            :disabled="offlineTesting"
             @click="handleSaveOffline"
           >
             保存下线提醒设置

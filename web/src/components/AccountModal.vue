@@ -166,12 +166,40 @@ async function submitManual() {
     form.code = code // Update UI
   }
 
-  const payload = {
-    id: props.editData?.id, // If editing
-    name: form.name,
-    code,
-    platform: form.platform,
-    loginType: 'manual',
+  // 检查是否仅修改了备注
+  let payload = {}
+  if (props.editData) {
+    // 编辑模式：检查是否只修改了备注
+    const onlyNameChanged = form.name !== props.editData.name
+      && form.code === (props.editData.code || '')
+      && form.platform === (props.editData.platform || 'qq')
+
+    if (onlyNameChanged) {
+      // 仅修改了备注，只发送 id 和 name
+      payload = {
+        id: props.editData.id,
+        name: form.name,
+      }
+    }
+    else {
+      // 修改了其他字段，发送完整 payload
+      payload = {
+        id: props.editData.id,
+        name: form.name,
+        code,
+        platform: form.platform,
+        loginType: 'manual',
+      }
+    }
+  }
+  else {
+    // 新增模式，发送完整 payload
+    payload = {
+      name: form.name,
+      code,
+      platform: form.platform,
+      loginType: 'manual',
+    }
   }
 
   await addAccount(payload)

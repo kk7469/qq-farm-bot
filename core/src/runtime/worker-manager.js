@@ -18,6 +18,8 @@ function createWorkerManager(options) {
         triggerOfflineReminder,
         addOrUpdateAccount,
         deleteAccount,
+        upsertFriendBlacklist,
+        broadcastConfigToWorkers,
         onStatusSync,
         onWorkerLog,
     } = options;
@@ -206,16 +208,16 @@ function createWorkerManager(options) {
                 // 忽略无效昵称
                 if (newNick && newNick !== '未知' && newNick !== '未登录') {
                     // 避免频繁写入，只在内存中无昵称或不一致时更新
-                    if (worker.name !== newNick) {
-                        const oldName = worker.name;
-                        worker.name = newNick;
+                    if (worker.nick !== newNick) {
+                        const oldNick = worker.nick;
+                        worker.nick = newNick;
                         addOrUpdateAccount({
                             id: accountId,
-                            name: newNick,
+                            nick: newNick,
                         });
                         // 仅在首次同步或名称变更时记录日志
-                        if (oldName !== newNick) {
-                            log('系统', `已同步账号昵称: ${oldName} -> ${newNick}`, { accountId, accountName: newNick });
+                        if (oldNick !== newNick) {
+                            log('系统', `已同步账号昵称: ${oldNick || 'None'} -> ${newNick}`, { accountId, accountName: worker.name });
                         }
                     }
                 }
@@ -298,6 +300,16 @@ function createWorkerManager(options) {
             });
             addAccountLog('kickout_stop', `账号 ${worker.name} 被踢下线，已自动停止`, accountId, worker.name, { reason });
             stopWorker(accountId);
+        } else if (msg.type === 'friend_blacklist_add') {
+            const gid = Number(msg.gid);
+            if (!Number.isFinite(gid) || gid <= 0) return;
+            if (typeof upsertFriendBlacklist !== 'function') return;
+            try {
+                const changed = !!upsertFriendBlacklist(accountId, gid);
+                if (changed && typeof broadcastConfigToWorkers === 'function') {
+                    broadcastConfigToWorkers(accountId);
+                }
+            } catch {}
         } else if (msg.type === 'api_response') {
             const { id, result, error } = msg;
             managerScheduler.clear(`api_timeout_${accountId}_${id}`);
