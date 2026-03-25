@@ -56,6 +56,7 @@ const AUTOMATION_SCHEMA = {
         land_upgrade: { type: 'boolean', default: true },
         friend: { type: 'boolean', default: true },
         friend_steal: { type: 'boolean', default: true },
+        friend_steal_blacklist: { type: 'array', items: { type: 'number', min: 1 }, default: [] },
         friend_help: { type: 'boolean', default: true },
         friend_bad: { type: 'boolean', default: false },
         friend_help_exp_limit: { type: 'boolean', default: true },
@@ -63,12 +64,22 @@ const AUTOMATION_SCHEMA = {
         email: { type: 'boolean', default: true },
         fertilizer_gift: { type: 'boolean', default: false },
         fertilizer_buy: { type: 'boolean', default: false },
+        fertilizer_buy_type: { type: 'string', oneOf: ['organic', 'normal', 'both'], default: 'organic' },
+        fertilizer_buy_max: { type: 'number', min: 1, max: 10, default: 10 },
+        fertilizer_buy_mode: { type: 'string', oneOf: ['threshold', 'unlimited'], default: 'threshold' },
+        fertilizer_buy_threshold: { type: 'number', min: 0, default: 100 },
         free_gifts: { type: 'boolean', default: true },
         share_reward: { type: 'boolean', default: true },
         vip_gift: { type: 'boolean', default: true },
         month_card: { type: 'boolean', default: true },
         open_server_gift: { type: 'boolean', default: true },
-        sell: { type: 'boolean', default: true },
+        sell: { type: 'boolean', default: false },
+        fertilizer_multi_season: { type: 'boolean', default: false },
+        fertilizer_land_types: {
+            type: 'array',
+            default: ['gold', 'black', 'red', 'normal'],
+            items: { type: 'string', oneOf: ['gold', 'black', 'red', 'normal'] },
+        },
         fertilizer: { 
             type: 'string', 
             oneOf: ['none', 'normal', 'organic', 'both'],
@@ -88,6 +99,16 @@ const INTERVALS_SCHEMA = {
         farmMax: { type: 'number', min: 1, max: INTERVAL_MAX_SEC, default: 2 },
         friendMin: { type: 'number', min: 1, max: INTERVAL_MAX_SEC, default: 10 },
         friendMax: { type: 'number', min: 1, max: INTERVAL_MAX_SEC, default: 10 },
+    },
+    additionalProperties: false,
+};
+
+//屏蔽等级配置Schema
+const BLOCKLEVEL_SCHEMA = {
+    type: 'object',
+    properties: {
+        enabled: { type: 'boolean', default: true },
+        Level: { type: 'number', min: 1, max: 999, default: 1 },
     },
     additionalProperties: false,
 };
@@ -123,6 +144,7 @@ const ACCOUNT_CONFIG_SCHEMA = {
             default: 'preferred',
         },
         preferredSeedId: { type: 'number', min: 0, default: 0 },
+        friendBlockLevel: BLOCKLEVEL_SCHEMA,
         friendQuietHours: QUIET_HOURS_SCHEMA,
         friendBlacklist: { type: 'array', items: { type: 'number' }, default: [] },
     },
@@ -143,14 +165,15 @@ const OFFLINE_REMINDER_SCHEMA = {
         },
         reloginUrlMode: {
             type: 'string',
-            oneOf: ['none', 'qq_link', 'qr_link'],
+            oneOf: ['none', 'qq_link', 'qr_code', 'all'],
             default: 'none',
         },
         endpoint: { type: 'string', maxLength: 500, default: '' },
         token: { type: 'string', maxLength: 200, default: '' },
         title: { type: 'string', maxLength: 100, default: '账号下线提醒' },
         msg: { type: 'string', maxLength: 500, default: '账号下线' },
-        offlineDeleteSec: { type: 'number', min: 60, max: 86400, default: 120 },
+        offlineDeleteSec: { type: 'number', min: 1, max: 9999999999, default: 1 },
+        offlineDeleteEnabled: { type: 'boolean', default: false },
     },
     required: ['channel'],
     additionalProperties: false,
@@ -165,6 +188,7 @@ class ConfigValidator {
         // 注册默认Schema
         this.registerSchema('automation', AUTOMATION_SCHEMA);
         this.registerSchema('intervals', INTERVALS_SCHEMA);
+        this.registerSchema('blockLevel', BLOCKLEVEL_SCHEMA);
         this.registerSchema('quietHours', QUIET_HOURS_SCHEMA);
         this.registerSchema('accountConfig', ACCOUNT_CONFIG_SCHEMA);
         this.registerSchema('offlineReminder', OFFLINE_REMINDER_SCHEMA);
@@ -316,6 +340,10 @@ function validateOfflineReminder(config) {
     return globalValidator.validateAndDefault('offlineReminder', config);
 }
 
+function validateBlockLevel(config) {
+    return globalValidator.validateAndDefault('blockLevel', config);
+}
+
 function validateQuietHours(config) {
     return globalValidator.validateAndDefault('quietHours', config);
 }
@@ -344,11 +372,13 @@ module.exports = {
     validateIntervals,
     validateAccountConfig,
     validateOfflineReminder,
+    validateBlockLevel,
     validateQuietHours,
     validateConfig,
     // Schema
     AUTOMATION_SCHEMA,
     INTERVALS_SCHEMA,
+    BLOCKLEVEL_SCHEMA,
     QUIET_HOURS_SCHEMA,
     ACCOUNT_CONFIG_SCHEMA,
     OFFLINE_REMINDER_SCHEMA,

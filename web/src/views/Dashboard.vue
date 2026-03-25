@@ -40,7 +40,7 @@ const allLogs = computed(() => {
     isAccountLog: true,
   }))
 
-  return [...sLogs, ...aLogs].sort((a: any, b: any) => a.ts - b.ts).filter((l: any) => !l.isAccountLog)
+  return [...sLogs, ...aLogs].sort((a: any, b: any) => b.ts - a.ts).filter((l: any) => !l.isAccountLog)
 })
 
 const filter = reactive({
@@ -89,7 +89,7 @@ const events = [
   { label: '土地解锁', value: 'unlock_land' },
   { label: '好友巡查', value: 'friend_cycle' },
   { label: '访问好友', value: 'visit_friend' },
-  { label: '加黑名单', value: '加黑名单' },
+  { label: '加黑名单', value: 'add_blacklist' },
 ]
 
 const eventLabelMap: Record<string, string> = Object.fromEntries(
@@ -432,15 +432,15 @@ function onLogScroll(e: Event) {
   const el = e.target as HTMLElement
   if (!el)
     return
-  const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50
-  autoScroll.value = isNearBottom
+  const isNearTop = el.scrollTop < 50
+  autoScroll.value = isNearTop
 }
 
 // Auto scroll logs
 watch(allLogs, () => {
   nextTick(() => {
     if (logContainer.value && autoScroll.value) {
-      logContainer.value.scrollTop = logContainer.value.scrollHeight
+      logContainer.value.scrollTop = 0
     }
   })
 }, { deep: true })

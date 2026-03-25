@@ -2,6 +2,7 @@
 node_modules/
 **/node_modules/
 .pnpm-store/
+.claude/
 
 # Lockfiles (pnpm workspace keeps pnpm-lock.yaml)
 package-lock.json
@@ -37,3 +38,4 @@ yarn-error.log*
 .idea/
 .DS_Store
 Thumbs.db
+/.vs

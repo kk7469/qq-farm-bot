@@ -12,6 +12,7 @@ const { updateStatusFromLogin, updateStatusGold, updateStatusLevel } = require('
 const { recordOperation } = require('../services/stats');
 const { types } = require('./proto');
 const { toLong, toNum, syncServerTime, log, logWarn } = require('./utils');
+const cryptoWasm = require('./crypto-wasm');
 
 // ============ 事件发射器 (用于推送通知) ============
 const networkEvents = new EventEmitter();
@@ -23,6 +24,19 @@ let serverSeq = 0;
 const pendingCallbacks = new Map();
 let wsErrorState = { code: 0, at: 0, message: '' };
 const networkScheduler = createScheduler('network');
+
+function rejectAllPendingRequests(reason = '请求被中断') {
+    const entries = Array.from(pendingCallbacks.entries());
+    pendingCallbacks.clear();
+    for (const [, callback] of entries) {
+        try {
+            callback(new Error(reason));
+        } catch {
+            // ignore callback failure
+        }
+    }
+    return entries.length;
+}
 
 // ============ 用户状态 (登录后设置) ============
 const userState = {
@@ -47,31 +61,65 @@ function hasOwn(obj, key) {
 }
 
 // ============ 消息编解码 ============
-function encodeMsg(serviceName, methodName, bodyBytes) {
+async function encodeMsg(serviceName, methodName, bodyBytes, clientSeqValue) {
+    let finalBody = bodyBytes || Buffer.alloc(0);
+    try {
+        finalBody = await cryptoWasm.encryptBuffer(finalBody);
+    } catch (e) {
+        // 兼容模式：如果加密失败（例如环境不支持），尝试发送未加密包，但打印警告
+        logWarn('系统', `WASM加密失败: ${e.message}`);
+    }
+
     const msg = types.GateMessage.create({
         meta: {
             service_name: serviceName,
             method_name: methodName,
             message_type: 1,
-            client_seq: toLong(clientSeq),
+            client_seq: toLong(clientSeqValue),
             server_seq: toLong(serverSeq),
         },
-        body: bodyBytes || Buffer.alloc(0),
+        body: finalBody,
     });
     const encoded = types.GateMessage.encode(msg).finish();
-    clientSeq++;
     return encoded;
 }
 
-function sendMsg(serviceName, methodName, bodyBytes, callback) {
+async function sendMsg(serviceName, methodName, bodyBytes, callback) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         log('系统', '[WS] 连接未打开');
+        if (callback) callback(new Error('连接未打开'));
         return false;
     }
     const seq = clientSeq;
-    const encoded = encodeMsg(serviceName, methodName, bodyBytes);
+    clientSeq += 1;
+    let encoded;
+    try {
+        encoded = await encodeMsg(serviceName, methodName, bodyBytes, seq);
+    } catch (err) {
+        if (callback) callback(err);
+        return false;
+    }
+
     if (callback) pendingCallbacks.set(seq, callback);
-    ws.send(encoded);
+
+    // 再次检查连接状态（因为 await 期间可能断开）
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        if (callback) {
+            pendingCallbacks.delete(seq);
+            callback(new Error('连接已在加密途中关闭'));
+        }
+        return false;
+    }
+
+    try {
+        ws.send(encoded);
+    } catch (err) {
+        if (callback) {
+            pendingCallbacks.delete(seq);
+            callback(err);
+        }
+        return false;
+    }
     return true;
 }
 
@@ -93,16 +141,21 @@ function sendMsgAsync(serviceName, methodName, bodyBytes, timeout = 10000) {
             reject(new Error(`请求超时: ${methodName} (seq=${seq}, pending=${pending})`));
         });
 
-        const sent = sendMsg(serviceName, methodName, bodyBytes, (err, body, meta) => {
+        sendMsg(serviceName, methodName, bodyBytes, (err, body, meta) => {
             networkScheduler.clear(timeoutKey);
             if (err) reject(err);
             else resolve({ body, meta });
-        });
-
-        if (!sent) {
+        }).then(sent => {
+            if (!sent) {
+                networkScheduler.clear(timeoutKey);
+                // 这里不再 reject，因为 callback 会被调用并 reject
+                // 但如果 sendMsg 返回 false 且没有调用 callback (例如连接未打开)，则需要处理
+                // 修改后的 sendMsg 会在连接未打开时调用 callback
+            }
+        }).catch(err => {
             networkScheduler.clear(timeoutKey);
-            reject(new Error(`发送失败: ${methodName}`));
-        }
+            reject(err);
+        });
     });
 }
 
@@ -299,18 +352,23 @@ function handleNotify(msg) {
     }
 }
 
+function buildDeviceInfo() {
+    const cfg = (CONFIG.device_info && typeof CONFIG.device_info === 'object') ? CONFIG.device_info : {};
+    return {
+        client_version: String(CONFIG.clientVersion || cfg.client_version || ''),
+        sys_software: String(cfg.sys_software || 'iOS 26.2.1'),
+        network: String(cfg.network || 'wifi'),
+        memory: String(cfg.memory || '7672'),
+        device_id: String(cfg.device_id || 'iPhone X<iPhone18,3>'),
+    };
+}
+
 // ============ 登录 ============
 function sendLogin(onLoginSuccess) {
     const body = types.LoginRequest.encode(types.LoginRequest.create({
         sharer_id: toLong(0),
         sharer_open_id: '',
-        device_info: {
-            client_version: CONFIG.clientVersion,
-            sys_software: 'iOS 26.2.1',
-            network: 'wifi',
-            memory: '7672',
-            device_id: 'iPhone X<iPhone18,3>',
-        },
+        device_info: buildDeviceInfo(),
         share_cfg_id: toLong(0),
         scene_id: '1256',
         report_data: {
@@ -391,10 +449,7 @@ function startHeartbeat() {
             if (heartbeatMissCount >= 2) {
                 log('心跳', '尝试重连...');
                 // 清理待处理的回调，避免堆积
-                pendingCallbacks.forEach((cb, _seq) => {
-                    try { cb(new Error('连接超时，已清理')); } catch { }
-                });
-                pendingCallbacks.clear();
+                rejectAllPendingRequests('连接超时，已清理');
             }
         }
 
@@ -421,7 +476,7 @@ let savedCode = null;
 function connect(code, onLoginSuccess) {
     savedLoginCallback = onLoginSuccess;
     if (code) savedCode = code;
-    const url = `${CONFIG.serverUrl}?platform=${CONFIG.platform}&os=${CONFIG.os}&ver=${CONFIG.clientVersion}&code=${savedCode}&openID=`;
+    const url = `${CONFIG.serverUrl}?platform=${encodeURIComponent(CONFIG.platform)}&os=${encodeURIComponent(CONFIG.os)}&ver=${encodeURIComponent(CONFIG.clientVersion)}&code=${encodeURIComponent(savedCode)}&openID=`;
 
     ws = new WebSocket(url, {
         headers: {
@@ -442,7 +497,7 @@ function connect(code, onLoginSuccess) {
 
     ws.on('close', (code, _reason) => {
         console.warn(`[WS] 连接关闭 (code=${code})`);
-        cleanup();
+        cleanup(`连接关闭(code=${code})`);
         // 自动重连：延迟 5s 后重试，复用已保存的登录回调
         if (savedLoginCallback) {
             networkScheduler.setTimeoutTask('auto_reconnect', 5000, () => {
@@ -466,13 +521,13 @@ function connect(code, onLoginSuccess) {
     });
 }
 
-function cleanup() {
+function cleanup(reason = '网络清理') {
+    rejectAllPendingRequests(`请求已中断: ${reason}`);
     networkScheduler.clearAll();
-    pendingCallbacks.clear();
 }
 
 function reconnect(newCode) {
-    cleanup();
+    cleanup('主动重连');
     if (ws) {
         ws.removeAllListeners();
         ws.close();
